@@ -1,0 +1,729 @@
+{
+  "name": "Fresher Job Alerts (hourly)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours"
+            }
+          ]
+        }
+      },
+      "id": "f8ab089b-964c-4615-a959-28cda378005d",
+      "name": "Every hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        48,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n//  ⚙️  SETTINGS — edit this node, nothing else needs changing\n// ============================================================\nconst settings = {\n  // --- where results go ---\n  emailTo: 'you@example.com',            // where alerts are sent\n  emailFrom: 'sender@gmail.com',     // must match your SMTP login\n  sheetId: 'YOUR_GOOGLE_SHEET_ID', // from the sheet URL: docs.google.com/spreadsheets/d/<THIS PART>/edit\n\n  // --- AI screening (Google Gemini, free tier) ---\n  // Alias that always points to Google's newest Flash-Lite model.\n  // If it ever errors, use an exact model ID from AI Studio, e.g. 'gemini-3.5-flash-lite'.\n  geminiModel: 'gemini-flash-lite-latest',\n  geminiBatchSize: 12,       // jobs judged per Gemini call\n  maxNewJobsPerRun: 96,      // safety cap per hourly run (rest are picked up next hour)\n\n  // --- your filters ---\n  maxYearsExperience: 1,          // fresher up to 1 year\n  includeUnclearExperience: true, // keep jobs that don't state experience (flagged in the email)\n  minMonthlyInr: 70000,           // 70k/month = 8.4 LPA. (10 LPA ≈ 83,333/month)\n  salaryCheck: 'max',             // 'max': keep if the TOP of the salary range ≥ minimum\n                                  // 'min': keep only if the BOTTOM of the range ≥ minimum\n  // approximate rates used to convert foreign salaries (Nov 2026)\n  usdToInr: 95,\n  eurToInr: 110,\n  gbpToInr: 127,\n\n  // Job title must match at least one of these (regex, case-insensitive)\n  roleKeywords: [\n    'software', '\\\\bsde\\\\b', '\\\\bswe\\\\b', 'developer', 'full[\\\\s-]?stack', 'front[\\\\s-]?end',\n    'back[\\\\s-]?end', 'forward[\\\\s-]?deployed', '\\\\bfde\\\\b', 'founding engineer',\n    'product engineer', 'member of technical staff', '\\\\bmts\\\\b', 'web engineer',\n    'application engineer', 'platform engineer', '\\\\bai engineer', 'new grad', 'graduate engineer',\n    'react', 'node', 'mern', 'javascript', 'typescript', 'python', 'golang', 'java\\\\b',\n  ],\n  // Job title must NOT match any of these\n  excludeTitle: [\n    '\\\\bsenior\\\\b', '\\\\bsr\\\\b', '\\\\bstaff\\\\b', '\\\\bprincipal\\\\b', '\\\\blead\\\\b', '\\\\bmanager\\\\b',\n    '\\\\bdirector\\\\b', '\\\\bhead\\\\b', '\\\\barchitect\\\\b', '\\\\bvp\\\\b', '\\\\bchief\\\\b',\n    '\\\\bintern(ship)?\\\\b', '\\\\bapprentice', '\\\\b(ii|iii|iv)\\\\b',\n    '(sde|swe|engineer|developer)[\\\\s-]*(2|3|4)\\\\b', '\\\\blevel\\\\s*(2|3|4)\\\\b',\n    'sales engineer', 'support engineer', 'solutions? engineer', 'qa\\\\b', 'test engineer',\n    'hardware', 'mechanical', 'electrical',\n  ],\n\n  // ---------------- sources ----------------\n  // Y Combinator job board pages (YC startups, many in India, often list salary + \"new grads ok\")\n  ycPages: [\n    'https://www.ycombinator.com/jobs/role/software-engineer/india',\n    'https://www.ycombinator.com/jobs/role/software-engineer/remote',\n  ],\n  // We Work Remotely RSS feeds\n  wwrFeeds: [\n    'https://weworkremotely.com/categories/remote-programming-jobs.rss',\n  ],\n  remoteOk: true,\n  // Himalayas search: entry-level remote jobs open to India\n  himalayasQueries: ['software engineer', 'full stack', 'frontend', 'backend', 'forward deployed engineer'],\n\n  // Company career pages with public APIs (companies hiring engineers in India).\n  // Add more: the slug is the last part of the company's job-board URL\n  //   Greenhouse: boards.greenhouse.io/<slug>   Lever: jobs.lever.co/<slug>   Ashby: jobs.ashbyhq.com/<slug>\n  greenhouse: [\n    'stripe', 'databricks', 'postman', 'mongodb', 'datadog', 'samsara', 'gitlab',\n    'cloudflare', 'airbnb', 'gleanwork', 'rubrik',\n  ],\n  lever: ['getzuma'],\n  ashby: ['harvey', 'cartesia', 'anyscale'],\n};\n\nreturn [{ json: settings }];\n"
+      },
+      "id": "9a0cb553-012c-466b-8922-df4d38e3370e",
+      "name": "Settings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        256,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Builds the list of URLs to fetch this run (one item per request).\nconst s = $('Settings').first().json;\nconst out = [];\nconst add = (source, kind, url, company = '') => out.push({ json: { source, kind, url, company } });\n\nfor (const url of s.ycPages || []) add('Y Combinator', 'yc', url);\nfor (const url of s.wwrFeeds || []) add('WeWorkRemotely', 'wwr', url);\nif (s.remoteOk) add('RemoteOK', 'remoteok', 'https://remoteok.com/api');\nfor (const q of s.himalayasQueries || []) {\n  add('Himalayas', 'himalayas',\n    'https://himalayas.app/jobs/api/search?q=' + encodeURIComponent(q) +\n    '&country=IN&seniority=Entry-level&sort=recent');\n}\nfor (const slug of s.greenhouse || []) {\n  add('Greenhouse', 'greenhouse', `https://boards-api.greenhouse.io/v1/boards/${slug}/jobs`, slug); // list only (no descriptions) to keep memory low\n}\nfor (const slug of s.lever || []) {\n  add('Lever', 'lever', `https://api.lever.co/v0/postings/${slug}?mode=json`, slug);\n}\nfor (const slug of s.ashby || []) {\n  add('Ashby', 'ashby', `https://api.ashbyhq.com/posting-api/job-board/${slug}?includeCompensation=true`, slug);\n}\nreturn out;\n"
+      },
+      "id": "e3fb7bef-30ae-44c7-bebd-293f7992dd1b",
+      "name": "Sources",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 4
+            }
+          },
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "ad64be07-8802-4d66-bbca-03b8d841111b",
+      "name": "Fetch sources",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        704,
+        384
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turns every source's raw response into one common job format.\nconst inputs = $input.all();\nconst sourcesNode = $('Sources').all();\nconst jobs = [];\nconst failures = [];\n\n// ---------- helpers ----------\nconst ENT = { amp: '&', lt: '<', gt: '>', quot: '\"', apos: \"'\", nbsp: ' ', '#39': \"'\", '#x27': \"'\", '#x2F': '/' };\nfunction decode(str) {\n  return String(str || '')\n    .replace(/&#(\\d+);/g, (_, n) => String.fromCodePoint(Number(n)))\n    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))\n    .replace(/&([a-z0-9#]+);/gi, (m, n) => (ENT[n] !== undefined ? ENT[n] : m));\n}\nfunction stripHtml(html) {\n  return decode(String(html || '')\n    .replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/g, '$1')\n    .replace(/<(script|style)[\\s\\S]*?<\\/\\1>/gi, ' ')\n    .replace(/<\\/(p|div|li|h\\d|br|tr)>|<br\\s*\\/?>/gi, '\\n')\n    .replace(/<[^>]+>/g, ' '))\n    .replace(/[ \\t ]+/g, ' ')\n    .replace(/\\s*\\n\\s*/g, '\\n')\n    .trim();\n}\n// Keep the start of the description plus every line that talks about experience, pay or location.\nfunction relevant(text, max = 2200) {\n  const t = String(text || '');\n  if (t.length <= max) return t;\n  const head = t.slice(0, 700);\n  const keyRe = /(year|yrs|experience|fresher|graduate|new grad|entry|junior|salary|compensation|ctc|lpa|lakh|stipend|pay|\\$|₹|inr|usd|location|remote|based in|relocat|time ?zone|visa|work authori)/i;\n  const lines = t.slice(700).split(/\\n|(?<=\\.)\\s+/).filter((l) => keyRe.test(l));\n  let extra = '';\n  for (const l of lines) {\n    if (extra.length + l.length > max - head.length) break;\n    extra += l.trim() + ' | ';\n  }\n  return head + ' … ' + extra;\n}\nconst cap = (s) => String(s || '').replace(/[-_]+/g, ' ').replace(/\\b\\w/g, (c) => c.toUpperCase());\nconst iso = (d) => { try { const x = typeof d === 'number' ? new Date(d < 1e12 ? d * 1000 : d) : new Date(d); return isNaN(x) ? '' : x.toISOString(); } catch (e) { return ''; } };\nconst norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();\nfunction job(o) {\n  const j = {\n    id: String(o.id),\n    source: o.source,\n    title: String(o.title || '').trim(),\n    company: String(o.company || '').trim(),\n    location: String(o.location || '').trim(),\n    salary: String(o.salary || '').trim(),\n    experience: String(o.experience || '').trim(),\n    description: relevant(o.description || ''),\n    url: o.url || '',\n    postedAt: o.postedAt || '',\n    remoteBoard: !!o.remoteBoard,\n  };\n  j.key = norm(j.company) + '|' + norm(j.title) + '|' + norm(j.location).slice(0, 40);\n  return j;\n}\n\n// ---------- parsers, one per source type ----------\nconst parsers = {\n  yc(html, src) {\n    const found = new Map();\n    const JOB_URL = /\\/companies\\/([a-z0-9-]+)\\/jobs\\/([A-Za-z0-9]+)(-[a-z0-9-]*)?/;\n    const m = html.match(/data-page=\"([^\"]+)\"/);\n    if (m) {\n      let data = null;\n      try { data = JSON.parse(decode(m[1])); } catch (e) { data = null; }\n      const walk = (node) => {\n        if (Array.isArray(node)) return node.forEach(walk);\n        if (!node || typeof node !== 'object') return;\n        if (typeof node.title === 'string') {\n          const urlVal = Object.values(node).find((v) => typeof v === 'string' && JOB_URL.test(v));\n          if (urlVal) {\n            const um = urlVal.match(JOB_URL);\n            const details = Object.entries(node)\n              .filter(([k, v]) => ['string', 'number', 'boolean'].includes(typeof v) && String(v).length < 300 && !/logo|image|avatar/i.test(k))\n              .map(([k, v]) => `${k}: ${v}`).join('; ');\n            const loc = node.location || node.prettyLocation || (Array.isArray(node.locations) ? node.locations.join(' / ') : '');\n            found.set(um[0], job({\n              id: 'yc:' + um[2],\n              source: src.source,\n              title: node.title,\n              company: node.companyName || (node.company && node.company.name) || cap(um[1]),\n              location: typeof loc === 'string' ? loc : JSON.stringify(loc),\n              salary: node.salaryRange || node.prettySalaryRange || node.salary || '',\n              experience: node.minExperience || node.prettyMinExperience || node.experience || '',\n              description: details,\n              url: 'https://www.ycombinator.com' + um[0],\n            }));\n          }\n        }\n        Object.values(node).forEach(walk);\n      };\n      if (data) walk(data);\n    }\n    if (!found.size) {\n      // Fallback: read job links straight from the HTML\n      const re = /href=\"(?:https:\\/\\/www\\.ycombinator\\.com)?(\\/companies\\/([a-z0-9-]+)\\/jobs\\/([A-Za-z0-9]+)-([a-z0-9-]+))\"/g;\n      let r;\n      while ((r = re.exec(html))) {\n        if (found.has(r[1])) continue;\n        found.set(r[1], job({\n          id: 'yc:' + r[3], source: src.source, title: cap(r[4]), company: cap(r[2]),\n          location: /india/.test(src.url) ? 'India' : '', description: '',\n          url: 'https://www.ycombinator.com' + r[1], remoteBoard: /remote/.test(src.url),\n        }));\n      }\n    }\n    return [...found.values()];\n  },\n\n  wwr(xml, src) {\n    const out = [];\n    const tag = (block, name) => {\n      const mm = block.match(new RegExp(`<${name}[^>]*>([\\\\s\\\\S]*?)<\\\\/${name}>`, 'i'));\n      return mm ? decode(mm[1].replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/g, '$1')).trim() : '';\n    };\n    for (const block of xml.split(/<item[\\s>]/i).slice(1)) {\n      const rawTitle = tag(block, 'title');\n      const idx = rawTitle.indexOf(':');\n      const company = idx > 0 ? rawTitle.slice(0, idx).trim() : '';\n      const title = idx > 0 ? rawTitle.slice(idx + 1).trim() : rawTitle;\n      const link = tag(block, 'link') || tag(block, 'guid');\n      out.push(job({\n        id: 'wwr:' + (tag(block, 'guid') || link),\n        source: src.source, title, company,\n        location: [tag(block, 'region'), tag(block, 'country')].filter(Boolean).join(' / '),\n        description: stripHtml(tag(block, 'description')),\n        url: link, postedAt: iso(tag(block, 'pubDate')), remoteBoard: true,\n      }));\n    }\n    return out;\n  },\n\n  remoteok(text, src) {\n    const arr = JSON.parse(text);\n    return (Array.isArray(arr) ? arr : []).filter((x) => x && x.position).map((x) => job({\n      id: 'rok:' + x.id, source: src.source, title: x.position, company: x.company,\n      location: x.location || '',\n      salary: x.salary_min ? `USD ${x.salary_min}${x.salary_max ? '-' + x.salary_max : ''} per year` : '',\n      description: stripHtml(x.description) + (x.tags ? '\\nTags: ' + x.tags.join(', ') : ''),\n      url: x.url || x.apply_url, postedAt: iso(x.date || x.epoch), remoteBoard: true,\n    }));\n  },\n\n  himalayas(text, src) {\n    const data = JSON.parse(text);\n    return (data.jobs || []).map((x) => {\n      const locs = (x.locationRestrictions || []).map((l) => (typeof l === 'string' ? l : l.name || l.alpha2)).filter(Boolean);\n      const sal = x.minSalary || x.maxSalary\n        ? `${x.currency || ''} ${x.minSalary || ''}${x.maxSalary ? '-' + x.maxSalary : ''} ${x.salaryPeriod ? 'per ' + x.salaryPeriod : ''}`.trim() : '';\n      return job({\n        id: 'him:' + (x.guid || x.applicationLink), source: src.source, title: x.title, company: x.companyName,\n        location: locs.length ? 'Remote: ' + locs.join(', ') : 'Remote (worldwide)',\n        salary: sal, experience: Array.isArray(x.seniority) ? x.seniority.join(', ') : (x.seniority || ''),\n        description: stripHtml(x.description || x.excerpt), url: x.applicationLink || x.guid,\n        postedAt: iso(x.pubDate), remoteBoard: true,\n      });\n    });\n  },\n\n  greenhouse(text, src) {\n    const data = JSON.parse(text);\n    return (data.jobs || []).map((x) => job({\n      id: 'gh:' + x.id, source: src.source + ' · ' + src.company, title: x.title,\n      company: x.company_name || cap(src.company),\n      location: (x.location && x.location.name) || '',\n      description: stripHtml(decode(x.content || '')),\n      url: x.absolute_url, postedAt: iso(x.first_published || x.updated_at),\n    }));\n  },\n\n  lever(text, src) {\n    const arr = JSON.parse(text);\n    return (Array.isArray(arr) ? arr : []).map((x) => {\n      const c = x.categories || {};\n      const sr = x.salaryRange;\n      const lists = (x.lists || []).map((l) => l.text + ': ' + stripHtml(l.content)).join('\\n');\n      return job({\n        id: 'lever:' + x.id, source: src.source + ' · ' + src.company, title: x.text, company: cap(src.company),\n        location: [c.location, ...(c.allLocations || []), x.workplaceType].filter(Boolean).join(' / '),\n        salary: sr ? `${sr.currency || ''} ${sr.min || ''}-${sr.max || ''} ${sr.interval || ''}`.trim() : '',\n        description: [x.descriptionPlain, lists, x.additionalPlain].filter(Boolean).join('\\n'),\n        url: x.hostedUrl, postedAt: iso(x.createdAt),\n      });\n    });\n  },\n\n  ashby(text, src) {\n    const data = JSON.parse(text);\n    return (data.jobs || []).filter((x) => x.isListed !== false).map((x) => {\n      const comp = x.compensation || {};\n      return job({\n        id: 'ashby:' + x.id, source: src.source + ' · ' + src.company, title: x.title, company: cap(src.company),\n        location: [x.location, ...(x.secondaryLocations || []).map((l) => l.location), x.isRemote ? 'Remote' : '']\n          .filter(Boolean).join(' / '),\n        salary: comp.scrapeableCompensationSalarySummary || comp.compensationTierSummary || '',\n        description: x.descriptionPlain || stripHtml(x.descriptionHtml),\n        url: x.jobUrl, postedAt: iso(x.publishedAt),\n      });\n    });\n  },\n};\n\n// ---------- run ----------\nfor (let i = 0; i < inputs.length; i++) {\n  let src;\n  try { src = $('Sources').itemMatching(i).json; } catch (e) { src = (sourcesNode[i] || {}).json; }\n  if (!src) continue;\n  const res = inputs[i].json || {};\n  const body = typeof res.data === 'string' ? res.data : (res.data ? JSON.stringify(res.data) : '');\n  if (res.error || !body) {\n    failures.push(`${src.source} ${src.company || ''} (${src.url}): ${res.error ? (res.error.message || JSON.stringify(res.error)).slice(0, 120) : 'empty response'}`);\n    continue;\n  }\n  try {\n    const parsed = parsers[src.kind](body, src);\n    jobs.push(...parsed.filter((j) => j.title && j.url));\n  } catch (e) {\n    failures.push(`${src.source} ${src.company || ''} (${src.url}): could not read response – ${e.message}`);\n  }\n}\n\n// failures ride along on the first item so the email can mention broken sources\nif (!jobs.length) return [{ json: { _empty: true, _sourceFailures: failures } }];\nreturn jobs.map((j, i) => ({ json: i === 0 ? { ...j, _sourceFailures: failures } : j }));\n"
+      },
+      "id": "d140847e-9ae0-4cd9-9ab9-13ac32c85fe0",
+      "name": "Parse sources",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        928,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Cheap, free filtering before anything reaches the AI:\n// title must look like a software role, not senior, and location must work from India.\nconst s = $('Settings').first().json;\nconst roleRe = new RegExp(s.roleKeywords.join('|'), 'i');\nconst excludeRe = new RegExp(s.excludeTitle.join('|'), 'i');\n\nconst INDIA = /india|bengaluru|bangalore|hyderabad|pune|mumbai|delhi|gurgaon|gurugram|noida|chennai|kolkata|ahmedabad|jaipur|kochi|indore|chandigarh|coimbatore|thiruvananthapuram|trivandrum|mysore|mysuru|bhubaneswar|nagpur|lucknow/i;\nconst INDIA_CODE = /(^|[\\s,(\\/-])IN([\\s,)\\/-]|$)/;           // \"Bengaluru, KA, IN\" / \"Remote (IN)\"\nconst OPEN = /anywhere|worldwide|global|asia|apac|international|\\bist\\b/i;\nconst REMOTE = /remote/i;\nconst ELSEWHERE = /\\b(us|usa|u\\.s\\.?|united states|canada|north america|americas|latam|latin america|europe|eu|emea|uk|united kingdom|germany|france|spain|poland|portugal|netherlands|ireland|australia|brazil|mexico|est|pst|cet)\\b/i;\n\nfunction locationOk(j) {\n  const loc = j.location || '';\n  if (INDIA.test(loc) || INDIA_CODE.test(loc) || OPEN.test(loc)) return true;\n  if (!loc.trim()) return j.remoteBoard;                  // remote job board with no restriction listed\n  if (REMOTE.test(loc) && !ELSEWHERE.test(loc)) return true; // plain \"Remote\" — let the AI read the details\n  return false;\n}\n\nconst seenIds = new Set();\nconst seenKeys = new Set();\nconst out = [];\nfor (const item of $input.all()) {\n  const j = item.json;\n  if (!j.id || !j.title) continue;\n  if (!roleRe.test(j.title) || excludeRe.test(j.title)) continue;\n  if (!locationOk(j)) continue;\n  if (seenIds.has(j.id) || seenKeys.has(j.key)) continue;   // same job listed twice in this run\n  seenIds.add(j.id);\n  seenKeys.add(j.key);\n  const { _sourceFailures, ...clean } = j;\n  out.push({ json: clean });\n}\nreturn out;\n"
+      },
+      "id": "490d2a2b-a9f5-4f68-9de3-cd4e4de0f0b1",
+      "name": "Pre-filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1136,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Settings').first().json.sheetId }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Seen"
+        },
+        "options": {}
+      },
+      "id": "63bee0c7-d483-4555-b2f2-6a6496f66a7e",
+      "name": "Read Seen jobs",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        48,
+        640
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Drops every job already recorded in the \"Seen\" tab, so you're only alerted once per job.\nconst s = $('Settings').first().json;\nconst seenIds = new Set();\nconst seenKeys = new Set();\nfor (const row of $input.all()) {\n  if (row.json.id) seenIds.add(String(row.json.id));\n  if (row.json.key) seenKeys.add(String(row.json.key));\n}\n\nconst fresh = $('Pre-filter').all()\n  .map((i) => i.json)\n  .filter((j) => !seenIds.has(j.id) && !seenKeys.has(j.key))\n  .sort((a, b) => String(b.postedAt).localeCompare(String(a.postedAt))); // newest first\n\nreturn fresh.slice(0, s.maxNewJobsPerRun).map((j) => ({ json: j }));\n"
+      },
+      "id": "ac8fe784-7bda-4a01-af0d-ec35c2951a7d",
+      "name": "Keep only new",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        256,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "gh:",
+              "operator": {
+                "type": "string",
+                "operation": "startsWith"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "92b189a0-ba6c-45ff-b62d-79ce8bcc84b3",
+      "name": "Needs description?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://boards-api.greenhouse.io/v1/boards/{{ $json.source.split(' · ')[1] }}/jobs/{{ $json.id.replace('gh:', '') }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 4,
+              "batchInterval": 500
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "7e3595b1-931a-4768-ab54-11f5cf49852e",
+      "name": "Fetch job description",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        704,
+        704
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Adds the full description to each new Greenhouse job (only new, pre-filtered jobs are fetched).\nconst ENT = { amp: '&', lt: '<', gt: '>', quot: '\"', apos: \"'\", nbsp: ' ' };\nconst decode = (str) => String(str || '')\n  .replace(/&#(\\d+);/g, (_, n) => String.fromCodePoint(Number(n)))\n  .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))\n  .replace(/&([a-z0-9#]+);/gi, (m, n) => (ENT[n] !== undefined ? ENT[n] : m));\nconst stripHtml = (html) => decode(String(html || '')\n  .replace(/<(script|style)[\\s\\S]*?<\\/\\1>/gi, ' ')\n  .replace(/<\\/(p|div|li|h\\d|br|tr)>|<br\\s*\\/?>/gi, '\\n')\n  .replace(/<[^>]+>/g, ' '))\n  .replace(/[ \\t]+/g, ' ')\n  .replace(/\\s*\\n\\s*/g, '\\n')\n  .trim();\nfunction relevant(t, max = 2200) {\n  if (t.length <= max) return t;\n  const head = t.slice(0, 700);\n  const keyRe = /(year|yrs|experience|fresher|graduate|new grad|entry|junior|salary|compensation|ctc|lpa|lakh|pay|\\$|₹|inr|usd|location|remote|based in|relocat|time ?zone|visa|work authori)/i;\n  let extra = '';\n  for (const l of t.slice(700).split(/\\n|\\.\\s+/).filter((x) => keyRe.test(x))) {\n    if (extra.length + l.length > max - head.length) break;\n    extra += l.trim() + ' | ';\n  }\n  return head + ' … ' + extra;\n}\n\nconst jobsIn = $('Needs description?').all();\nreturn $input.all().map((item, i) => {\n  let job;\n  try { job = $('Needs description?').itemMatching(i).json; } catch (e) { job = (jobsIn[i] || {}).json || {}; }\n  const content = item.json && typeof item.json.content === 'string' ? item.json.content : '';\n  const text = content ? relevant(stripHtml(decode(content))) : '';\n  return { json: { ...job, description: text || job.description || '' } };\n});\n"
+      },
+      "id": "7d869204-01ba-47bb-aff9-b93e9ee2dfb8",
+      "name": "Attach description",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        928,
+        704
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "5ce5a171-6e1e-4a1f-b08c-d52b1c37d867",
+      "name": "All new jobs",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1152,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Packs the new jobs into small groups and writes the screening prompt for Gemini.\nconst s = $('Settings').first().json;\nconst jobs = $input.all().map((i) => i.json);\n\nconst instructions = `You screen job postings for one candidate based in India.\nCandidate: fresher / new graduate with up to ${s.maxYearsExperience} year(s) of experience.\nTarget roles: software engineer / SDE / SWE, forward deployed engineer (FDE), full-stack, frontend, backend, founding/product engineer, and similar hands-on software development roles.\n\nFor EVERY job in the list return one object with:\n- ref: copy the job's ref exactly.\n- role_match: true if it is a hands-on software engineering/development role of the kinds above. false for sales/solutions/support engineers, QA-only or manual testing, data analyst, designer, hardware, management, or non-engineering roles.\n- experience_fit: \"yes\" if it is open to freshers/new grads/entry level, or the MINIMUM experience asked is ${s.maxYearsExperience} year(s) or less (e.g. \"0-2 years\", \"1-3 years\", \"new grads ok\", \"Engineer I\", \"SDE-1\", \"junior\", \"associate\"). \"no\" if the minimum is more than ${s.maxYearsExperience} year(s) (e.g. \"2+ years\", \"3+ years\") or it is senior/lead/staff. \"unclear\" if experience is not mentioned anywhere.\n- experience_text: a short note of what it says, e.g. \"0-1 yrs\", \"new grads ok\", \"3+ yrs\", \"not stated\".\n- location_ok: true if someone living in India can take it: based in India (on-site/hybrid/remote), or remote and open to India, Asia/APAC, or worldwide/anywhere. false if on-site outside India, or remote but restricted to other countries/regions or requiring work authorization outside India.\n- salary_min_inr_month and salary_max_inr_month: the stated BASE salary converted to Indian rupees PER MONTH. Annual amounts divide by 12; hourly multiply by 160. Rates: 1 USD = ${s.usdToInr} INR, 1 EUR = ${s.eurToInr} INR, 1 GBP = ${s.gbpToInr} INR. \"LPA\" or \"lakhs per annum\" = that many lakh rupees per year; \"₹1.5M\" = 15 lakh per year; \"K\" = thousand. If only one number is given use it for both. Use null for both when no salary is stated. Ignore equity/ESOPs.\n- reason: at most 15 words explaining the decision.\n\nReturn ONLY a JSON array.`;\n\nconst schema = {\n  type: 'ARRAY',\n  items: {\n    type: 'OBJECT',\n    properties: {\n      ref: { type: 'STRING' },\n      role_match: { type: 'BOOLEAN' },\n      experience_fit: { type: 'STRING', enum: ['yes', 'no', 'unclear'] },\n      experience_text: { type: 'STRING' },\n      location_ok: { type: 'BOOLEAN' },\n      salary_min_inr_month: { type: 'NUMBER', nullable: true },\n      salary_max_inr_month: { type: 'NUMBER', nullable: true },\n      reason: { type: 'STRING' },\n    },\n    required: ['ref', 'role_match', 'experience_fit', 'experience_text', 'location_ok', 'reason'],\n  },\n};\n\nconst out = [];\nfor (let start = 0; start < jobs.length; start += s.geminiBatchSize) {\n  const group = jobs.slice(start, start + s.geminiBatchSize).map((j, k) => ({\n    ref: String(start + k), // position in \"All new jobs\" output\n    title: j.title,\n    company: j.company,\n    location: j.location,\n    salary: j.salary || 'not stated',\n    experience: j.experience || '',\n    source: j.source,\n    details: j.description,\n  }));\n  out.push({\n    json: {\n      refs: group.map((g) => g.ref),\n      requestBody: {\n        contents: [{ role: 'user', parts: [{ text: instructions + '\\n\\nJOBS:\\n' + JSON.stringify(group, null, 1) }] }],\n        generationConfig: { responseMimeType: 'application/json', responseSchema: schema },\n      },\n    },\n  });\n}\nreturn out;\n"
+      },
+      "id": "a1ae557e-4f90-4d26-a3e6-af662949daa5",
+      "name": "Gemini batches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/{{ $('Settings').first().json.geminiModel }}:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googlePalmApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 7000
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "9a9cdb6f-3933-42a7-8035-93119101e1df",
+      "name": "Gemini screen",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        784,
+        640
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Reads Gemini's verdicts and applies your rules (role, experience, location, salary).\n// Jobs whose Gemini call failed are left out, so they are retried next hour.\nconst s = $('Settings').first().json;\nconst jobs = $('All new jobs').all().map((i) => i.json);\nconst now = new Date().toISOString();\nconst fmt = (n) => '₹' + Math.round(n).toLocaleString('en-IN');\n\nconst out = [];\nconst done = new Set();\nfor (const item of $input.all()) {\n  const r = item.json || {};\n  if (r.error) continue;\n  const text = (((r.candidates || [])[0] || {}).content || {}).parts\n    ? r.candidates[0].content.parts.filter((p) => !p.thought).map((p) => p.text || '').join('')\n    : '';\n  if (!text) continue;\n  let verdicts;\n  try { verdicts = JSON.parse(text); } catch (e) {\n    const m = text.match(/\\[[\\s\\S]*\\]/);\n    try { verdicts = m ? JSON.parse(m[0]) : []; } catch (e2) { verdicts = []; }\n  }\n  for (const v of Array.isArray(verdicts) ? verdicts : []) {\n    const job = jobs[Number(v.ref)];\n    if (!job || done.has(v.ref)) continue;\n    done.add(v.ref);\n\n    const lo = typeof v.salary_min_inr_month === 'number' ? v.salary_min_inr_month : null;\n    const hi = typeof v.salary_max_inr_month === 'number' ? v.salary_max_inr_month : null;\n    const compare = s.salaryCheck === 'min' ? (lo ?? hi) : (hi ?? lo);\n    const salaryOk = compare === null || compare >= s.minMonthlyInr;\n    const expOk = v.experience_fit === 'yes' || (v.experience_fit === 'unclear' && s.includeUnclearExperience);\n    const match = !!v.role_match && expOk && !!v.location_ok && salaryOk;\n\n    const failed = [];\n    if (!v.role_match) failed.push('role');\n    if (!expOk) failed.push('experience');\n    if (!v.location_ok) failed.push('location');\n    if (!salaryOk) failed.push('salary');\n\n    let salaryText = 'Not disclosed';\n    if (lo !== null || hi !== null) {\n      salaryText = lo !== null && hi !== null && lo !== hi ? `${fmt(lo)} – ${fmt(hi)}/month` : `${fmt(hi ?? lo)}/month`;\n      if (job.salary) salaryText += ` (${job.salary})`;\n    }\n\n    out.push({\n      json: {\n        ...job,\n        match,\n        verdict: match ? 'MATCH' : 'rejected: ' + failed.join(', '),\n        reason: v.reason || '',\n        experienceText: v.experience_fit === 'unclear' ? 'Not stated' : (v.experience_text || v.experience_fit),\n        salaryText,\n        salaryDisclosed: lo !== null || hi !== null,\n        checkedAt: now,\n      },\n    });\n  }\n}\nreturn out;\n"
+      },
+      "id": "84dc92b0-e8fc-4ae3-9258-48ea4b799dc4",
+      "name": "Apply rules",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1008,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One row per screened job for the \"Seen\" tab (so it's never screened or emailed twice).\nreturn $input.all().map((i) => ({\n  json: {\n    id: i.json.id,\n    key: i.json.key,\n    title: i.json.title,\n    company: i.json.company,\n    verdict: i.json.verdict,\n    checked_at: i.json.checkedAt,\n  },\n}));\n"
+      },
+      "id": "ac2a887d-4668-4ef0-b7a1-c9f92cd18e58",
+      "name": "Seen rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1216,
+        544
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Settings').first().json.sheetId }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Seen"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "03122f97-8ee0-4c93-991e-de0cb80096c8",
+      "name": "Save to Seen tab",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1440,
+        544
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Keeps only jobs that passed every rule and shapes them as rows for the \"Jobs\" tab.\nconst when = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });\nreturn $input.all()\n  .filter((i) => i.json.match === true)\n  .map((i) => ({\n    json: {\n      'Found (IST)': when,\n      Title: i.json.title,\n      Company: i.json.company,\n      Location: i.json.location,\n      Salary: i.json.salaryText,\n      Experience: i.json.experienceText,\n      Source: i.json.source,\n      Link: i.json.url,\n      Why: i.json.reason,\n      Status: '',\n    },\n  }));\n"
+      },
+      "id": "4180dcc8-62cb-4ea2-ae7b-6e72b871f552",
+      "name": "Matching jobs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1216,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Settings').first().json.sheetId }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Jobs"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "ad301fe9-9553-426a-b79e-3c446f03f917",
+      "name": "Save to Jobs tab",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1440,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Builds one email listing every new matching job.\nconst jobs = $('Matching jobs').all().map((i) => i.json);\nif (!jobs.length) return [];\n\nlet failures = [];\ntry { failures = $('Parse sources').first().json._sourceFailures || []; } catch (e) { failures = []; }\n\nconst esc = (s) => String(s || '').replace(/[&<>\"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' }[c]));\nconst when = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });\n\nconst cards = jobs.map((j) => `\n  <tr><td style=\"padding:14px 16px;border-bottom:1px solid #eee;\">\n    <div style=\"font-size:16px;font-weight:600;\"><a href=\"${esc(j.Link)}\" style=\"color:#1a56db;text-decoration:none;\">${esc(j.Title)}</a></div>\n    <div style=\"color:#333;margin-top:2px;\">${esc(j.Company)} · ${esc(j.Location || 'Location not listed')}</div>\n    <div style=\"margin-top:6px;font-size:13px;color:#555;\">\n      💰 ${esc(j.Salary)} &nbsp;|&nbsp; 🎓 ${esc(j.Experience)} &nbsp;|&nbsp; 🔎 ${esc(j.Source)}\n    </div>\n    <div style=\"margin-top:4px;font-size:13px;color:#777;\">${esc(j.Why)}</div>\n  </td></tr>`).join('');\n\nconst footer = failures.length\n  ? `<p style=\"font-size:12px;color:#999;margin-top:16px;\">Sources that failed this run (retried next hour):<br>${failures.map(esc).join('<br>')}</p>`\n  : '';\n\nconst html = `<div style=\"font-family:Arial,Helvetica,sans-serif;max-width:680px;\">\n  <h2 style=\"margin:0 0 4px;\">${jobs.length} new job${jobs.length > 1 ? 's' : ''} for you</h2>\n  <div style=\"color:#777;font-size:13px;margin-bottom:12px;\">Found ${esc(when)} IST · fresher / ≤1 yr · India or remote</div>\n  <table style=\"border-collapse:collapse;width:100%;border:1px solid #eee;\">${cards}</table>\n  ${footer}\n</div>`;\n\nconst names = [...new Set(jobs.map((j) => j.Company))];\nreturn [{\n  json: {\n    subject: `${jobs.length} new job${jobs.length > 1 ? 's' : ''}: ${names.slice(0, 2).join(', ')}${names.length > 2 ? ' + more' : ''}`,\n    html,\n  },\n}];\n"
+      },
+      "id": "44cf0df6-f140-42dd-973e-16c6322e0ea7",
+      "name": "Build email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1664,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $('Settings').first().json.emailFrom }}",
+        "toEmail": "={{ $('Settings').first().json.emailTo }}",
+        "subject": "={{ $json.subject }}",
+        "html": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "dbeef2e7-c5da-4bba-83bc-2423229c4200",
+      "name": "Send email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1888,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Job alert bot — setup (5 min)\n1. **Settings** node: put your email, Google Sheet ID, and tweak filters.\n2. **Read Seen jobs / Save to … tab**: pick your *Google Service Account* credential. Sheet needs two empty tabs named **Jobs** and **Seen** (headers are created automatically).\n3. **Gemini screen**: pick a *Google Gemini (PaLM) API* credential (free key from aistudio.google.com).\n4. **Send email**: pick an *SMTP* credential (Gmail + app password).\n5. Click **Execute workflow** once to test, then **Publish/Activate** it so it runs every hour.",
+        "height": 300,
+        "width": 700,
+        "color": 4
+      },
+      "id": "fecfe720-6c29-4042-b647-77087b62a674",
+      "name": "Note 17",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### How it works\nCollect jobs from YC, WeWorkRemotely, RemoteOK, Himalayas and company career APIs → keep software roles that aren't senior and work from India → skip anything already in **Seen** → Gemini checks experience (≤1 yr), location and salary (≥ ₹70k/month, unknown salary allowed) → save matches to **Jobs** and email them.",
+        "height": 300,
+        "width": 520,
+        "color": 7
+      },
+      "id": "abcfe494-e475-4fee-9da9-4a0d177cb9da",
+      "name": "Note 18",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        736,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Every hour": {
+      "main": [
+        [
+          {
+            "node": "Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Settings": {
+      "main": [
+        [
+          {
+            "node": "Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sources": {
+      "main": [
+        [
+          {
+            "node": "Fetch sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch sources": {
+      "main": [
+        [
+          {
+            "node": "Parse sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse sources": {
+      "main": [
+        [
+          {
+            "node": "Pre-filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pre-filter": {
+      "main": [
+        [
+          {
+            "node": "Read Seen jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Seen jobs": {
+      "main": [
+        [
+          {
+            "node": "Keep only new",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Keep only new": {
+      "main": [
+        [
+          {
+            "node": "Needs description?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs description?": {
+      "main": [
+        [
+          {
+            "node": "Fetch job description",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "All new jobs",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Fetch job description": {
+      "main": [
+        [
+          {
+            "node": "Attach description",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach description": {
+      "main": [
+        [
+          {
+            "node": "All new jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "All new jobs": {
+      "main": [
+        [
+          {
+            "node": "Gemini batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini batches": {
+      "main": [
+        [
+          {
+            "node": "Gemini screen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini screen": {
+      "main": [
+        [
+          {
+            "node": "Apply rules",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply rules": {
+      "main": [
+        [
+          {
+            "node": "Seen rows",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Matching jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Seen rows": {
+      "main": [
+        [
+          {
+            "node": "Save to Seen tab",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Matching jobs": {
+      "main": [
+        [
+          {
+            "node": "Save to Jobs tab",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to Jobs tab": {
+      "main": [
+        [
+          {
+            "node": "Build email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build email": {
+      "main": [
+        [
+          {
+            "node": "Send email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "nodeGroups": [
+    {
+      "id": "7a0ad3d5-e810-41df-8d42-6bddcf8eadd3",
+      "name": "Collect job listings",
+      "nodeIds": [
+        "9a0cb553-012c-466b-8922-df4d38e3370e",
+        "e3fb7bef-30ae-44c7-bebd-293f7992dd1b",
+        "ad64be07-8802-4d66-bbca-03b8d841111b",
+        "d140847e-9ae0-4cd9-9ab9-13ac32c85fe0",
+        "490d2a2b-a9f5-4f68-9de3-cd4e4de0f0b1"
+      ],
+      "description": "Pulls listings from job boards and company career pages, keeps non-senior software roles open to India"
+    },
+    {
+      "id": "76ca9413-c832-4e73-921e-3ab1e66d1d75",
+      "name": "Prepare new jobs",
+      "nodeIds": [
+        "63bee0c7-d483-4555-b2f2-6a6496f66a7e",
+        "ac8fe784-7bda-4a01-af0d-ec35c2951a7d",
+        "92b189a0-ba6c-45ff-b62d-79ce8bcc84b3",
+        "7e3595b1-931a-4768-ab54-11f5cf49852e",
+        "7d869204-01ba-47bb-aff9-b93e9ee2dfb8",
+        "5ce5a171-6e1e-4a1f-b08c-d52b1c37d867"
+      ],
+      "description": "Skips jobs already in the Seen tab, then fetches full descriptions only for the new career-page jobs"
+    },
+    {
+      "id": "ff5914f1-cd22-4048-b35f-0130953a497b",
+      "name": "Screen with AI",
+      "nodeIds": [
+        "a1ae557e-4f90-4d26-a3e6-af662949daa5",
+        "9a9cdb6f-3933-42a7-8035-93119101e1df"
+      ],
+      "description": "Sends new jobs in small batches for an experience, location and salary check"
+    },
+    {
+      "id": "08102e11-71d2-441d-864f-7841dd31dc08",
+      "name": "Record and notify matches",
+      "nodeIds": [
+        "84dc92b0-e8fc-4ae3-9258-48ea4b799dc4",
+        "ac2a887d-4668-4ef0-b7a1-c9f92cd18e58",
+        "03122f97-8ee0-4c93-991e-de0cb80096c8",
+        "4180dcc8-62cb-4ea2-ae7b-6e72b871f552",
+        "ad301fe9-9553-426a-b79e-3c446f03f917",
+        "44cf0df6-f140-42dd-973e-16c6322e0ea7",
+        "dbeef2e7-c5da-4bba-83bc-2423229c4200"
+      ],
+      "description": "Applies your rules, logs every checked job, saves matches to the sheet and emails them"
+    }
+  ],
+  "tags": []
+}
