@@ -1,0 +1,7 @@
+# Google service-account keys and other secrets
+*service-account*.json
+*-key.json
+.env
+
+# n8n local data (if using the Node.js install inside this folder)
+.n8n/
